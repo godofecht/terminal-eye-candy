@@ -2,7 +2,7 @@
 """Pane 3 — Interactive system prompt editor (AI rewrites its own instructions)"""
 import os, sys, signal, time, termios, tty, select, textwrap, datetime
 
-CLAUDE_MD = os.path.expanduser('~/.claude/CLAUDE.md')
+CLAUDE_MD = os.path.expanduser('~/terminal-eye-candy/CLAUDE.md')
 
 old_tty = None
 def cleanup(*a):

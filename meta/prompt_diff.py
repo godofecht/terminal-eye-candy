@@ -11,7 +11,7 @@ signal.signal(signal.SIGINT, cleanup)
 signal.signal(signal.SIGTERM, cleanup)
 sys.stdout.write('\033[?25l')
 
-CLAUDE_MD = os.path.expanduser('~/.claude/CLAUDE.md')
+CLAUDE_MD = os.path.expanduser('~/terminal-eye-candy/CLAUDE.md')
 history   = []   # list of (timestamp, old_lines, new_lines)
 prev_text = None
 prev_hash = None

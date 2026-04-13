@@ -11,10 +11,11 @@ signal.signal(signal.SIGINT, cleanup)
 signal.signal(signal.SIGTERM, cleanup)
 sys.stdout.write('\033[?25l')
 
+PROJECT_ROOT = os.path.expanduser('~/terminal-eye-candy')
 PATHS = [
+    os.path.join(PROJECT_ROOT, 'CLAUDE.md'),
+    os.path.join(PROJECT_ROOT, '.claude/CLAUDE.md'),
     os.path.expanduser('~/.claude/CLAUDE.md'),
-    os.path.join(os.getcwd(), 'CLAUDE.md'),
-    os.path.join(os.getcwd(), '.claude/CLAUDE.md'),
 ]
 
 def find_claude_md():
