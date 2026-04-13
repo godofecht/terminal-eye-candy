@@ -1,12 +1,24 @@
 #!/usr/bin/env python3
 """terminal-eye-candy — CLAUDE.md click editor"""
-import os, sys, signal, time, termios, tty, select
+import os, sys, signal, time, termios, tty, select, struct, fcntl
 
 CLAUDE_MD = os.path.expanduser('~/terminal-eye-candy/CLAUDE.md')
 GUTTER    = 5   # " NNN " column
 
-old_tty = None
-fd      = sys.stdin.fileno()
+old_tty      = None
+fd           = sys.stdin.fileno()
+need_clear   = True   # full \033[2J on next render
+
+def get_size():
+    """Read terminal size via ioctl — always reflects current pane size."""
+    try:
+        buf = fcntl.ioctl(sys.stdout.fileno(), termios.TIOCGWINSZ, b'\x00' * 8)
+        rows, cols = struct.unpack('HHHH', buf)[:2]
+        if cols > 0 and rows > 0:
+            return cols, rows
+    except Exception:
+        pass
+    return 80, 24
 
 def term_restore():
     if old_tty:
@@ -19,8 +31,13 @@ def cleanup(*_):
     term_restore()
     sys.exit(0)
 
-signal.signal(signal.SIGINT,  cleanup)
-signal.signal(signal.SIGTERM, cleanup)
+def on_resize(*_):
+    global need_clear
+    need_clear = True
+
+signal.signal(signal.SIGINT,   cleanup)
+signal.signal(signal.SIGTERM,  cleanup)
+signal.signal(signal.SIGWINCH, on_resize)
 
 old_tty = termios.tcgetattr(fd)
 tty.setraw(fd)
@@ -42,8 +59,6 @@ scroll = 0
 dirty  = False
 status = ''
 status_t   = 0.0
-prev_size  = (0, 0)
-
 def clamp_cx():
     global cx
     cx = min(cx, len(lines[cy]))
@@ -61,15 +76,13 @@ def hl(line):
     return '\033[90m'
 
 def render():
-    global prev_size
-    try:    cols, rows = os.get_terminal_size()
-    except: cols, rows = 80, 24
-    text_rows = rows - 2
+    global need_clear
+    cols, rows = get_size()
+    text_rows  = rows - 2
 
-    cur_size = (cols, rows)
-    if cur_size != prev_size:
-        sys.stdout.write('\033[2J')   # full clear on resize
-        prev_size = cur_size
+    if need_clear:
+        sys.stdout.write('\033[2J')
+        need_clear = False
 
     out = '\033[H'   # move home, then overwrite line-by-line
 
@@ -125,9 +138,8 @@ render()
 
 # ── main loop ─────────────────────────────────────────────────────────────────
 while True:
-    try:    cols, rows = os.get_terminal_size()
-    except: cols, rows = 80, 24
-    text_rows = rows - 2
+    cols, rows = get_size()
+    text_rows  = rows - 2
 
     ready, _, _ = select.select([sys.stdin], [], [], 0.5)
     if not ready:
