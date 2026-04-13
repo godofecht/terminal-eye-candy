@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
-"""terminal-eye-candy — CLAUDE.md editor  (click, type, Ctrl-S to save)"""
+"""terminal-eye-candy — CLAUDE.md click editor"""
 import os, sys, signal, time, termios, tty, select
 
 CLAUDE_MD = os.path.expanduser('~/terminal-eye-candy/CLAUDE.md')
-MARGIN    = 4   # left gutter width (line numbers + space)
-
-# ── terminal setup ────────────────────────────────────────────────────────────
+GUTTER    = 5   # " NNN " column
 
 old_tty = None
 fd      = sys.stdin.fileno()
@@ -16,8 +14,7 @@ def term_restore():
         except Exception: pass
 
 def cleanup(*_):
-    sys.stdout.write('\033[?1000l\033[?1006l')   # disable mouse
-    sys.stdout.write('\033[0m\033[?25h\033[2J\033[H')
+    sys.stdout.write('\033[?1000l\033[?1006l\033[0m\033[?25h\033[2J\033[H')
     sys.stdout.flush()
     term_restore()
     sys.exit(0)
@@ -27,217 +24,189 @@ signal.signal(signal.SIGTERM, cleanup)
 
 old_tty = termios.tcgetattr(fd)
 tty.setraw(fd)
-sys.stdout.write('\033[?25l')                    # hide cursor while drawing
-sys.stdout.write('\033[?1000h\033[?1006h')       # enable SGR mouse reporting
+# hide cursor, enable SGR mouse, clear screen
+sys.stdout.write('\033[?25l\033[?1000h\033[?1006h\033[2J\033[H')
 sys.stdout.flush()
 
-# ── file I/O ──────────────────────────────────────────────────────────────────
-
 def load():
-    try:
-        return open(CLAUDE_MD).read().split('\n')
-    except FileNotFoundError:
-        return ['']
+    try:    return open(CLAUDE_MD).read().splitlines()
+    except: return ['']
 
 def save(lines):
     os.makedirs(os.path.dirname(CLAUDE_MD), exist_ok=True)
     open(CLAUDE_MD, 'w').write('\n'.join(lines))
 
-# ── state ─────────────────────────────────────────────────────────────────────
-
-lines    = load()
-cx, cy   = 0, 0        # cursor col, row  (into lines[])
-scroll   = 0           # first visible line
-dirty    = False
-status   = 'Ctrl-S save  Ctrl-Q quit  click to move cursor'
-status_t = time.time()
+lines  = load()
+cx, cy = 0, 0
+scroll = 0
+dirty  = False
+status = ''
+status_t   = 0.0
+prev_size  = (0, 0)
 
 def clamp_cx():
     global cx
-    cx = max(0, min(cx, len(lines[cy])))
+    cx = min(cx, len(lines[cy]))
 
-# ── input reader ──────────────────────────────────────────────────────────────
+def set_status(msg):
+    global status, status_t
+    status, status_t = msg, time.time()
 
-def read_input():
-    """Return one logical key/event or None."""
-    r, _, _ = select.select([sys.stdin], [], [], 0.05)
-    if not r:
-        return None
-    raw = os.read(fd, 128)
-    return raw
-
-def parse_sgr_mouse(seq):
-    """Parse ESC[<Cb;Cx;CyM  →  (btn, col-1, row-1, press)."""
-    # seq = b'<Cb;Cx;CyM' or b'<...m'
-    try:
-        s    = seq.decode('ascii', errors='ignore')
-        press= s.endswith('M')
-        s    = s.lstrip('<').rstrip('Mm')
-        b, x, y = (int(v) for v in s.split(';'))
-        return b, x-1, y-1, press
-    except Exception:
-        return None
-
-# ── renderer ──────────────────────────────────────────────────────────────────
-
-def colorize(line):
-    if line.startswith('# '):   return '\033[97;1m'
-    if line.startswith('## '):  return '\033[96;1m'
-    if line.startswith('### '): return '\033[93m'
+def hl(line):
+    if line.startswith('# '):                         return '\033[97;1m'
+    if line.startswith('## '):                        return '\033[96;1m'
+    if line.startswith('### '):                       return '\033[93m'
     if line.startswith('- ') or line.startswith('* '): return '\033[37m'
-    if line.startswith('```'):  return '\033[32m'
-    return '\033[37m'
+    if line.startswith('```'):                        return '\033[32m'
+    return '\033[90m'
 
 def render():
-    try: cols, rows = os.get_terminal_size()
-    except Exception: cols, rows = 80, 24
+    global prev_size
+    try:    cols, rows = os.get_terminal_size()
+    except: cols, rows = 80, 24
+    text_rows = rows - 2
 
-    text_rows = rows - 2   # reserve top bar + bottom status
+    cur_size = (cols, rows)
+    if cur_size != prev_size:
+        sys.stdout.write('\033[2J')   # full clear on resize
+        prev_size = cur_size
 
-    out = '\033[H'   # move to top-left (no clear — avoids flicker)
+    out = '\033[H'   # move home, then overwrite line-by-line
 
     # ── header ────────────────────────────────────────────────────────────────
-    fname   = os.path.basename(CLAUDE_MD)
-    marker  = ' [+]' if dirty else ''
-    title   = f'  CLAUDE.md editor — {fname}{marker}'
-    hint    = '  Ctrl-S save  Ctrl-Q quit'
-    gap     = cols - len(title) - len(hint)
-    bar     = title + ' '*max(0,gap) + hint
-    out    += f'\033[7m{bar[:cols]:<{cols}}\033[0m\n'
+    mark  = ' [+]' if dirty else '     '
+    left  = f'  CLAUDE.md{mark}'
+    right = '  Ctrl-S save   Ctrl-Q quit  '
+    hdr   = (left + ' ' * max(0, cols - len(left) - len(right)) + right)[:cols]
+    out  += f'\033[7m{hdr}\033[0m\n'
 
-    # ── content ───────────────────────────────────────────────────────────────
-    visible = lines[scroll : scroll + text_rows]
-    for i, line in enumerate(visible):
-        abs_row  = scroll + i
-        lnum     = f'{abs_row+1:>{MARGIN-1}} '
-        lnum_col = '\033[93m' if abs_row == cy else '\033[90m'
+    # ── file content ──────────────────────────────────────────────────────────
+    for i in range(text_rows):
+        r = scroll + i
+        if r >= len(lines):
+            out += '\033[90m~\033[K\033[0m\n'
+            continue
 
-        # truncate to fit
-        text_w   = cols - MARGIN
-        disp     = line[:text_w]
+        line     = lines[r]
+        lnum     = f'{r+1:>{GUTTER-1}} '       # always GUTTER chars wide
+        lnum_col = '\033[33m' if r == cy else '\033[90m'
+        disp     = line[:cols - GUTTER]
+        c        = hl(disp)
 
-        col_code = colorize(disp)
-
-        if abs_row == cy:
-            # draw cursor inside this line
-            safe_cx = min(cx, len(disp))
-            before  = disp[:safe_cx]
-            cur_ch  = disp[safe_cx] if safe_cx < len(disp) else ' '
-            after   = disp[safe_cx+1:] if safe_cx < len(disp) else ''
-            row_out = (col_code + before +
-                       '\033[7m' + cur_ch + '\033[27m' +
-                       col_code + after)
+        if r == cy:
+            scx = min(cx, len(disp))
+            ch  = disp[scx] if scx < len(disp) else ' '
+            body = c + disp[:scx] + '\033[7m' + ch + '\033[27m' + c + disp[scx+1:]
         else:
-            row_out = col_code + disp
+            body = c + disp
 
-        out += f'{lnum_col}{lnum}\033[0m{row_out}\033[0m\033[K\n'
-
-    # pad remaining rows
-    for _ in range(text_rows - len(visible)):
-        out += '\033[90m~\033[0m\033[K\n'
+        out += f'{lnum_col}{lnum}\033[0m{body}\033[0m\033[K\n'
 
     # ── status bar ────────────────────────────────────────────────────────────
-    pos_info = f'Ln {cy+1}/{len(lines)}  Col {cx+1}'
-    msg      = status if time.time() - status_t < 4 else ''
-    gap2     = cols - len(pos_info) - len(msg) - 2
-    sbar     = f' {msg}{" "*max(0,gap2)}{pos_info} '
-    out     += f'\033[7m{sbar[:cols]:<{cols}}\033[0m'
+    pos  = f' Ln {cy+1}/{len(lines)}  Col {cx+1} '
+    msg  = (' ' + status + '  ') if status and time.time() - status_t < 3 else ''
+    sbar = (msg + ' ' * max(0, cols - len(msg) - len(pos)) + pos)[:cols]
+    out += f'\033[7m{sbar}\033[0m'
 
     sys.stdout.write(out)
     sys.stdout.flush()
 
+def parse_mouse(raw):
+    try:
+        s     = raw.decode('ascii', errors='ignore').lstrip('<').rstrip('Mm')
+        b,x,y = (int(v) for v in s.split(';'))
+        press = not raw.endswith(b'm')
+        return b, x-1, y-1, press   # 0-indexed col/row
+    except:
+        return None
+
+# ── initial draw ──────────────────────────────────────────────────────────────
+render()
+
 # ── main loop ─────────────────────────────────────────────────────────────────
-
-def set_status(msg):
-    global status, status_t
-    status  = msg
-    status_t = time.time()
-
 while True:
-    try: cols, rows = os.get_terminal_size()
-    except Exception: cols, rows = 80, 24
+    try:    cols, rows = os.get_terminal_size()
+    except: cols, rows = 80, 24
     text_rows = rows - 2
 
-    render()
-
-    raw = read_input()
-    if raw is None:
+    ready, _, _ = select.select([sys.stdin], [], [], 0.5)
+    if not ready:
+        render()   # idle tick (catches resize)
         continue
 
-    # ── parse escape sequences ────────────────────────────────────────────────
-    if raw == b'\x11':           # Ctrl-Q
+    raw = os.read(fd, 256)
+    if not raw:
+        continue
+
+    # Ctrl-Q
+    if raw == b'\x11':
         cleanup()
 
-    elif raw == b'\x13':         # Ctrl-S
+    # Ctrl-S
+    elif raw == b'\x13':
         save(lines)
         dirty = False
         set_status('Saved!')
 
-    elif raw.startswith(b'\x1b[<'):   # SGR mouse
-        parsed = parse_sgr_mouse(raw[2:])
+    # SGR mouse  ESC [ < ...
+    elif b'\x1b[<' in raw:
+        idx    = raw.index(b'\x1b[<')
+        parsed = parse_mouse(raw[idx+2:])
         if parsed:
             btn, mx, my, press = parsed
-            if press and btn == 0:   # left click
-                clicked_row = scroll + my - 1   # -1 for header bar
-                if 0 <= clicked_row < len(lines):
-                    cy = clicked_row
-                    cx = max(0, min(mx - MARGIN, len(lines[cy])))
+            if press and btn == 0:             # left-click down
+                nr = scroll + (my - 1)         # row 0 = header
+                if 0 <= nr < len(lines):
+                    cy = nr
+                    cx = max(0, min(mx - GUTTER, len(lines[cy])))
 
+    # arrow / special keys
     elif raw.startswith(b'\x1b['):
         key = raw[2:]
-        if   key == b'A':   # up
-            if cy > 0: cy -= 1; clamp_cx()
-            if cy < scroll: scroll = cy
-        elif key == b'B':   # down
-            if cy < len(lines)-1: cy += 1; clamp_cx()
-            if cy >= scroll + text_rows: scroll = cy - text_rows + 1
-        elif key == b'C':   # right
+        if   key == b'A':   cy = max(cy-1, 0);               clamp_cx()
+        elif key == b'B':   cy = min(cy+1, len(lines)-1);    clamp_cx()
+        elif key == b'C':
             if cx < len(lines[cy]): cx += 1
             elif cy < len(lines)-1: cy += 1; cx = 0
-        elif key == b'D':   # left
+        elif key == b'D':
             if cx > 0: cx -= 1
             elif cy > 0: cy -= 1; cx = len(lines[cy])
-        elif key == b'H':   cx = 0                          # Home
-        elif key == b'F':   cx = len(lines[cy])             # End
-        elif key == b'5~':  scroll = max(0, scroll-text_rows); cy = max(cy-text_rows, 0)  # PgUp
-        elif key == b'6~':  scroll = min(len(lines)-1, scroll+text_rows); cy = min(cy+text_rows, len(lines)-1)  # PgDn
-        elif key == b'3~':  # Delete
+        elif key == b'H':   cx = 0
+        elif key == b'F':   cx = len(lines[cy])
+        elif key == b'3~':                                    # Delete
             row = lines[cy]
             if cx < len(row):
-                lines[cy] = row[:cx] + row[cx+1:]
+                lines[cy] = row[:cx] + row[cx+1:]; dirty = True
             elif cy < len(lines)-1:
-                lines[cy] = row + lines.pop(cy+1)
-            dirty = True
+                lines[cy] += lines.pop(cy+1);     dirty = True
 
-    elif raw == b'\x1b':   pass   # bare ESC — ignore
+    # bare ESC — ignore
+    elif raw == b'\x1b':
+        pass
 
-    elif raw in (b'\r', b'\n'):   # Enter
+    # Enter
+    elif raw in (b'\r', b'\n'):
         row = lines[cy]
-        lines[cy]    = row[:cx]
-        lines.insert(cy+1, row[cx:])
-        cy += 1; cx = 0
-        if cy >= scroll + text_rows: scroll += 1
-        dirty = True
+        lines[cy] = row[:cx]; lines.insert(cy+1, row[cx:])
+        cy += 1; cx = 0; dirty = True
 
-    elif raw in (b'\x7f', b'\x08'):  # Backspace
+    # Backspace
+    elif raw in (b'\x7f', b'\x08'):
         if cx > 0:
-            lines[cy] = lines[cy][:cx-1] + lines[cy][cx:]
-            cx -= 1
+            lines[cy] = lines[cy][:cx-1] + lines[cy][cx:]; cx -= 1; dirty = True
         elif cy > 0:
-            cx = len(lines[cy-1])
-            lines[cy-1] += lines.pop(cy)
-            cy -= 1
-            if cy < scroll: scroll = cy
-        dirty = True
+            cx = len(lines[cy-1]); lines[cy-1] += lines.pop(cy); cy -= 1; dirty = True
 
+    # printable text
     else:
         ch = raw.decode('utf-8', errors='ignore')
         if ch and all(ord(c) >= 32 for c in ch):
             lines[cy] = lines[cy][:cx] + ch + lines[cy][cx:]
-            cx += len(ch)
-            dirty = True
+            cx += len(ch); dirty = True
 
-    # keep scroll in sync
-    if cy < scroll: scroll = cy
-    if cy >= scroll + text_rows: scroll = cy - text_rows + 1
+    # keep scroll in sync with cursor
+    if cy < scroll:               scroll = cy
+    if cy >= scroll + text_rows:  scroll = cy - text_rows + 1
     scroll = max(0, scroll)
+
+    render()
