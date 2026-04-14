@@ -133,6 +133,18 @@ def parse_mouse(raw):
     except:
         return None
 
+# ── wait for WezTerm to finish splitting and send SIGWINCH ───────────────────
+# The pane starts at full window width; WezTerm resizes it and sends SIGWINCH
+# after the split completes. Poll until size stabilises before first render.
+_size = get_size()
+for _ in range(20):          # up to 1 second
+    select.select([], [], [], 0.05)
+    _new = get_size()
+    if _new != _size:
+        _size = _new
+        break
+need_clear = True            # always do a full clear on first draw
+
 # ── initial draw ──────────────────────────────────────────────────────────────
 render()
 
