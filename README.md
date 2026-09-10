@@ -58,3 +58,10 @@ wezterm cli split-pane -- python3 meta/prompt_viewer.py
 ## Licence
 
 MIT. See [LICENSE](LICENSE).
+
+## What they look like
+
+Captured by running each script in a pseudo-terminal at 100 by 30 and rendering
+the final frame. No screen recorder involved.
+
+![starfield, matrix rain, fire, plasma, game of life and the block clock](docs/animations.jpg)
